@@ -724,14 +724,15 @@ function renderList() {
     const col=CAT_COLORS[t.category]||'#666';
     const amtCol=t.amount>=0?'#5aab82':'#e8845c';
     const canEdit = !t.isInstance;
+    const safeId = encodeURIComponent(t.id);
     const revealBtns = canEdit ? `
       <div class="txn-actions-reveal">
-        <button class="swipe-btn swipe-edit" onclick="openEdit('${t.id}');resetSwipe(this)">✎</button>
-        <button class="swipe-btn swipe-delete" onclick="confirmDelete('${t.id}')">✕</button>
+        <button class="swipe-btn swipe-edit" data-id="${safeId}" onclick="handleSwipeEdit(this)">✎</button>
+        <button class="swipe-btn swipe-delete" data-id="${safeId}" onclick="handleSwipeDelete(this)">✕</button>
       </div>` : '';
-    return `<div class="txn-wrap" id="wrap_${t.id}">
+    return `<div class="txn-wrap" id="wrap_${safeId}">
       ${revealBtns}
-      <div class="txn-row" id="row_${t.id}"${canEdit?` data-id="${t.id}" ontouchstart="swipeStart(event,this)" ontouchmove="swipeMove(event,this)" ontouchend="swipeEnd(event,this)"`:''}> 
+      <div class="txn-row" id="row_${safeId}"${canEdit?` data-id="${safeId}" ontouchstart="swipeStart(event,this)" ontouchmove="swipeMove(event,this)" ontouchend="swipeEnd(event,this)"`:''}> 
         <div class="cat-dot" style="background:${col}"></div>
         <div class="txn-meta">
           <div class="txn-top">
@@ -1002,7 +1003,7 @@ function openEdit(id) {
   if (!t) return;
 
   state.editingId = id;
-  state.editingBaseId = t.id;
+  state.editingBaseId = t.id; // always the real stored transaction id
   state.editingInstanceDate = instanceDate; // null if editing the base itself
 
   const isRecurring = t.recurrence && t.recurrence !== 'None';
@@ -1125,24 +1126,24 @@ function saveTransaction() {
 function deleteEditing() {
   if(!state.editingId) return;
   const scope = state.editScope || 'all';
-  const baseId = state.editingBaseId;
+  const baseId = state.editingBaseId || state.editingId;
   const base = state.transactions.find(t=>t.id===baseId);
   const instanceDate = state.editingInstanceDate;
 
   let msg = 'Delete this transaction?';
-  if (scope==='all') msg = 'Delete ALL occurrences of this recurring transaction?';
+  if (scope==='all' && base && base.recurrence && base.recurrence!=='None')
+    msg = 'Delete ALL occurrences of this recurring transaction?';
   else if (scope==='future') msg = 'Delete this and all future occurrences?';
+
   if (!confirm(msg)) return;
 
   if (scope==='all') {
-    // Remove base + all its overrides
     state.transactions = state.transactions.filter(t=>
       t.id!==baseId && t.overrideBaseId!==baseId
     );
   } else if (scope==='future') {
     const cutDate = instanceDate || (base && base.date);
     if (base && cutDate) base.endDate = cutDate;
-    // Remove overrides on or after cutDate for this base
     state.transactions = state.transactions.filter(t=>
       !(t.overrideBaseId===baseId && t.date>=cutDate)
     );
@@ -1216,29 +1217,48 @@ function swipeEnd(e, el) {
   swipeState = null;
 }
 
-function resetSwipe(btn) {
-  // Close swipe after tapping a reveal button
-  const wrap = btn.closest('.txn-wrap');
+function resetSwipe(el) {
+  const wrap = el.closest ? el.closest('.txn-wrap') : document.getElementById('wrap_'+el);
   if (!wrap) return;
   const row = wrap.querySelector('.txn-row');
   if (row) { row.style.transition = ''; row.style.transform = ''; }
 }
 
+function handleSwipeEdit(btn) {
+  const id = decodeURIComponent(btn.dataset.id);
+  resetSwipe(btn);
+  openEdit(id);
+}
+
+function handleSwipeDelete(btn) {
+  const id = decodeURIComponent(btn.dataset.id);
+  confirmDelete(id);
+}
+
 function confirmDelete(id) {
-  if (!confirm('Delete this transaction?')) { resetSwipeById(id); return; }
-  state.transactions = state.transactions.filter(t=>t.id!==id&&!t.id.startsWith(id+'_r_'));
-  save(); render();
+  // Use setTimeout to escape touch handler — iOS blocks confirm() inside touchend
+  setTimeout(() => {
+    if (!confirm('Delete this transaction?')) {
+      resetSwipe(document.getElementById('wrap_'+encodeURIComponent(id)));
+      return;
+    }
+    state.transactions = state.transactions.filter(t=>
+      t.id!==id && !t.id.startsWith(id+'_r_') && t.overrideBaseId!==id
+    );
+    save(); render();
+  }, 50);
 }
 
 function resetSwipeById(id) {
-  const row = document.getElementById('row_'+id);
+  const row = document.getElementById('row_'+encodeURIComponent(id));
   if (row) { row.style.transition=''; row.style.transform=''; }
 }
 
 // Tap elsewhere resets any open swipe
 document.addEventListener('touchstart', e=>{
   document.querySelectorAll('.txn-row[style*="translateX"]').forEach(row=>{
-    if (!row.contains(e.target) && !row.nextElementSibling?.contains(e.target)) {
+    const wrap = row.closest('.txn-wrap');
+    if (wrap && !wrap.contains(e.target)) {
       row.style.transform='';
     }
   });
